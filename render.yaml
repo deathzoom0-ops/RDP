@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: bloodyray-windows-bridge
+    runtime: python
+    plan: free
+    rootDir: windows-studio-bridge
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT bridge:app
+    healthCheckPath: /healthz
+    envVars:
+      - key: GITHUB_REPO
+        value: deathzoom0-ops/RDP
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: STUDIO_BRIDGE_KEY
+        sync: false
+      - key: BRIDGE_DB
+        value: /tmp/bloodyray-jobs.sqlite3
