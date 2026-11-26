@@ -9,4 +9,4 @@ GITHUB_REPO = "deathzoom0-ops/RDP"
 [[d1_databases]]
 binding = "JOBS"
 database_name = "bloodyray-jobs"
-database_id = "COLE-O-ID-DO-D1"
+database_id = "83d3a215-cdf0-474c-b9a8-ffdd7b8e9899"
