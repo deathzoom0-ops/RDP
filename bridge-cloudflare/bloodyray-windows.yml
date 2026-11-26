@@ -1,0 +1,91 @@
+name: BloodyRay Windows
+run-name: BloodyRay ${{ inputs.ticket }}
+on:
+  workflow_dispatch:
+    inputs:
+      ticket:
+        required: true
+        type: string
+      preset:
+        required: true
+        type: choice
+        options: [torre, arco, blender-chanfro]
+permissions: {}
+jobs:
+  generate:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - name: Generate RBXMX
+        if: inputs.preset != 'blender-chanfro'
+        shell: pwsh
+        env:
+          PRESET: ${{ inputs.preset }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Piece($name,$x,$y,$sx,$sy) {
+            "<Item class='Part'><Properties><string name='Name'>$name</string><Vector3 name='Size'><X>$sx</X><Y>$sy</Y><Z>4</Z></Vector3><Vector3 name='Position'><X>$x</X><Y>$y</Y><Z>0</Z></Vector3><bool name='Anchored'>true</bool><Color3 name='Color'><R>0.36</R><G>0.45</G><B>0.57</B></Color3></Properties></Item>"
+          }
+          $body = switch ($env:PRESET) {
+            torre { (Piece 'Base' 0 1 8 2) + (Piece 'Coluna' 0 6 4 8) + (Piece 'Mirante' 0 10.5 8 1) }
+            arco { (Piece 'Pilar esquerdo' -4 4 2 8) + (Piece 'Pilar direito' 4 4 2 8) + (Piece 'Verga' 0 8.5 10 1) }
+            default { throw 'Preset inválido.' }
+          }
+          "<roblox version='4'><Item class='Model'><Properties><string name='Name'>Windows $env:PRESET</string></Properties>$body</Item></roblox>" | Set-Content -Encoding utf8 result.rbxmx
+      - name: Generate mesh in Blender Windows
+        if: inputs.preset == 'blender-chanfro'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'blender-pinned.zip'
+          Invoke-WebRequest -Uri 'https://download.blender.org/release/Blender4.3/blender-4.3.2-windows-x64.zip' -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '933a62a770c941e316535f893629ff106ddd2aa5a956f0081ec557439073d4f6') { throw 'Blender checksum mismatch' }
+          $dest = Join-Path $env:RUNNER_TEMP 'blender-tool'
+          Expand-Archive $zip -DestinationPath $dest
+          $blender = Get-ChildItem -Path $dest -Filter blender.exe -Recurse | Select-Object -First 1
+          if (!$blender) { throw 'Blender executable missing' }
+          @'
+          import bpy
+          from pathlib import Path
+          bpy.ops.wm.read_factory_settings(use_empty=True)
+          bpy.ops.mesh.primitive_cube_add(size=4)
+          cube = bpy.context.object
+          bevel = cube.modifiers.new('Chamfer', 'BEVEL')
+          bevel.width = 0.35
+          bevel.segments = 1
+          bpy.ops.object.modifier_apply(modifier=bevel.name)
+          mesh = cube.data
+          mesh.calc_loop_triangles()
+          lines = [f'v {v.co.x:.6f} {v.co.z:.6f} {-v.co.y:.6f}' for v in mesh.vertices]
+          lines += ['f ' + ' '.join(str(i + 1) for i in tri.vertices) for tri in mesh.loop_triangles]
+          assert 0 < len(mesh.loop_triangles) <= 180
+          Path('result.obj').write_text('\n'.join(lines) + '\n', encoding='ascii')
+          '@ | Set-Content -Encoding utf8 generate.py
+          & $blender.FullName --background --factory-startup --python-exit-code 1 --python generate.py
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path result.obj)) { throw 'Blender did not produce the mesh' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloodyray-result
+          path: |
+            result.rbxmx
+            result.obj
+          retention-days: 1
+          if-no-files-found: error
+      - name: Deliver model to Studio bridge
+        if: always()
+        shell: pwsh
+        env:
+          TICKET: ${{ inputs.ticket }}
+          WORKER_URL: ${{ vars.BLOODYRAY_WORKER_URL }}
+          DELIVERY_KEY: ${{ secrets.WINDOWS_DELIVERY_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:TICKET -notmatch '^[a-f0-9]{32}$' -or $env:WORKER_URL -notmatch '^https://[a-z0-9.-]+$' -or !$env:DELIVERY_KEY) { throw 'Configure a URL e o segredo de entrega.' }
+          $payload = @{ticket=$env:TICKET;status='failed'}
+          if ($env:JOB_STATUS -eq 'success') {
+            foreach ($kind in @('rbxmx','obj')) {
+              if (Test-Path "result.$kind") { $payload.status='ready'; $payload.format=$kind; $payload.content=Get-Content "result.$kind" -Raw; break }
+            }
+          }
+          Invoke-RestMethod -Method Post -Uri "$env:WORKER_URL/delivery" -Headers @{Authorization="Bearer $env:DELIVERY_KEY"} -ContentType 'application/json; charset=utf-8' -Body ($payload | ConvertTo-Json -Compress) | Out-Null
